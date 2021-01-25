@@ -1,0 +1,271 @@
+---
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: Lambda Scaling Function
+
+Parameters:
+  scaleToZeroTime:
+    Type: Number
+
+  Cluster:
+    Type: String
+
+  Service:
+    Type: String
+
+  LoadBalancer:
+    Type: String
+
+Resources:
+  LambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Sid: ''
+          Effect: Allow
+          Principal:
+            Service:
+            - lambda.amazonaws.com
+          Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+      - PolicyName: LambdaPolicy
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+          - Action: "states:*"
+            Resource: "*"
+            Effect: Allow
+          - Action: "ec2:*"
+            Resource: "*"
+            Effect: Allow
+          - Action: "elasticloadbalancing:*"
+            Resource: "*"
+            Effect: Allow
+          - Action: "ecs:*"
+            Resource: "*"
+            Effect: Allow
+          - Action: "codepipeline:*"
+            Resource: "*"
+            Effect: Allow
+          - Action:
+            - logs:CreateLogGroup
+            - logs:CreateLogStream
+            - logs:PutLogEvents
+            Resource:
+            - Fn::Sub: arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*
+            Effect: Allow
+    
+  ScalingLambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Join ['-', ['ScalingLambdaFunction', !Ref 'AWS::AccountId']]
+      Description: "Scales the ECS Fargate Tasks"
+      Handler: "index.lambda_handler"
+      Runtime: "python3.7"
+      Role: !GetAtt ["LambdaRole", "Arn"]
+      Environment:
+        Variables:
+          cluster_arn: !Ref Cluster
+          service_arn: !Ref Service
+          state_arn: !Join [':', ['arn:aws:states', !Ref 'AWS::Region', !Ref 'AWS::AccountId', 'stateMachine', !Join ['-', ['MyStateMachine', !Ref 'AWS::StackName']]]]
+      Code:
+        ZipFile: |
+            import botocore
+            import json
+            import boto3
+            import os
+
+            client = boto3.client('ecs')
+            code_pipeline = boto3.client('codepipeline')
+
+            def lambda_handler(event, context):
+                service_arn = os.environ['service_arn']
+                cluster_arn = os.environ['cluster_arn']
+                state_arn = os.environ['state_arn']
+
+                try:
+                    job_id = event['CodePipeline.job']['id']
+                except KeyError as e:
+                    job_id = None
+                            
+                try:
+                    desired_count = event['desired_count']
+                except Exception as e:
+                    desired_count = 1
+
+                try:
+                    client.update_service(
+                        cluster = cluster_arn,
+                        service = service_arn,
+                        desiredCount=int(desired_count)
+                    )
+                    
+                except botocore.exceptions.ClientError as e:
+                    put_job_failure(job_id, 'Unable to scale the cluster' + str(e))
+                    raise Exception('Unable to scale the cluster' + str(e))
+                
+                try:
+                  # If we are starting the tasks on the cluster, we need to sent a task to state machine to turn it off in X amount of time
+                  if int(desired_count) > 0:
+
+                    step_functions = boto3.client('stepfunctions')
+                    
+                    # List all running executions (if any) and stop them because this is a new deployment in the pipeline
+                    executions = step_functions.list_executions(
+                        stateMachineArn=state_arn,
+                        statusFilter='RUNNING'
+                    )
+                    
+                    for execution in executions['executions']:
+                        step_functions.stop_execution(
+                        executionArn=execution['executionArn']
+                        )                     
+                    
+                    # Start new timed execution
+                    step_functions.start_execution(
+                        stateMachineArn=state_arn,
+                        input = json.dumps({'desired_count': 0})
+                    )   
+                    
+                except botocore.exceptions.ClientError as e:
+                    put_job_failure(job_id, 'Unable to trigger state machine: ' + str(e))
+                    
+                    raise Exception('Unable to trigger state machine: ' + str(e))
+                    
+                put_job_success(job_id, 'Cluster scaled succesfully')
+
+            def put_job_success(job, message):
+                if not job:
+                    print('Skipping job action')
+                    return
+                
+                print('Putting job success')
+                print(message)
+                code_pipeline.put_job_success_result(jobId=job)    
+              
+            def put_job_failure(job, message):
+                if not job:
+                    print('Skipping job action')
+                    return
+                
+                print('Putting job failure')
+                print(message)
+                fd = {'message': message, 'type': 'JobFailed'}
+                code_pipeline.put_job_failure_result(jobId=job, failureDetails=fd) 
+        
+
+  StatesExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - !Sub states.${AWS::Region}.amazonaws.com
+            Action: "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: StatesExecutionPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "lambda:InvokeFunction"
+                Resource: "*"
+
+  MyStateMachine:
+    Type: "AWS::StepFunctions::StateMachine"
+    Properties:
+      StateMachineName: !Join ['-', ['MyStateMachine', !Ref 'AWS::StackName']]
+      DefinitionString:
+        !Sub
+          - |-
+            {
+              "Comment": "Wait to scale Fargate back to zero",
+              "StartAt": "WaitState",
+              "States": {
+                "WaitState": {
+                  "Type": "Wait",
+                  "Seconds": ${timeout},
+                  "Next": "StopLambda"
+                },
+                "StopLambda": {
+                  "Type": "Task",
+                  "Resource": "${lambdaArn}",
+                  "End": true
+                }
+              }
+            }
+          - {lambdaArn: !GetAtt [ ScalingLambdaFunction, Arn ], timeout: !Ref scaleToZeroTime}
+      RoleArn: !GetAtt [ StatesExecutionRole, Arn ]                  
+
+  WatchLBFor503s:
+    Type: AWS::SNS::Topic
+      
+  LB503HandlerServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        - Fn::Join:
+            - ""
+            - - "arn:"
+              - Ref: AWS::Partition
+              - :iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+
+  LB503HandlerAllowInvokecdkalarmwatchlbfor503:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ScalingLambdaFunction
+      Principal: sns.amazonaws.com
+      SourceArn:
+        Ref: WatchLBFor503s
+
+  LB503HandlerwatchLb:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: lambda
+      TopicArn:
+        Ref: WatchLBFor503s
+      Endpoint: !GetAtt [ ScalingLambdaFunction, Arn ]
+
+  LB503Alarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      ActionsEnabled: true
+      AlarmActions:
+        - Ref: WatchLBFor503s
+      AlarmDescription: 503s coming in
+      DatapointsToAlarm: 1
+      Dimensions:
+        - Name: LoadBalancer        
+          Value: !Join ['/', ['app', !Select [1, !Split ['app/', !Ref LoadBalancer]]]]
+      MetricName: HTTPCode_ELB_5XX_Count
+      Namespace: AWS/ApplicationELB
+      Period: 60
+      Statistic: Minimum
+      Threshold: 1
+
+Outputs:
+  StateMachine:
+    Description: "ECS Fargate Scaling state Machine"
+    Value: !Ref MyStateMachine
+
+  ECSScalingLambdaFunction:
+    Description: "ECS Fargate Scaling lambda function"
+    Value: !Ref ScalingLambdaFunction

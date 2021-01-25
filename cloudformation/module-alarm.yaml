@@ -1,0 +1,65 @@
+Parameters:
+  ScalingLambdaFunction:
+    Type: String
+
+  LoadBalancer:
+    Type: String
+
+Resources:
+  WatchLBFor503s:
+    Type: AWS::SNS::Topic
+    Metadata:
+      aws:cdk:path: cdk-alarm/watch-lb-for-503/Resource
+  LB503HandlerServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+        Version: "2012-10-17"
+      ManagedPolicyArns:
+        - Fn::Join:
+            - ""
+            - - "arn:"
+              - Ref: AWS::Partition
+              - :iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+    Metadata:
+      aws:cdk:path: cdk-alarm/LB503Handler/ServiceRole/Resource
+  LB503HandlerAllowInvokecdkalarmwatchlbfor503:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ScalingLambdaFunction
+      Principal: sns.amazonaws.com
+      SourceArn:
+        Ref: WatchLBFor503s
+  LB503HandlerwatchLb:
+    Type: AWS::SNS::Subscription
+    Properties:
+      Protocol: lambda
+      TopicArn:
+        Ref: WatchLBFor503s
+      Endpoint: !Ref ScalingLambdaFunction
+    Metadata:
+      aws:cdk:path: cdk-alarm/LB503Handler/watch-lb-for-503/Resource
+  myAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      ActionsEnabled: true
+      AlarmActions:
+        - Ref: WatchLBFor503s
+      AlarmDescription: 503s coming in
+      DatapointsToAlarm: 1
+      Dimensions:
+        - Name: LoadBalancer        
+          Value: !Join ['/', ['app', !Select [1, !Split ['app/', !Ref LoadBalancer]]]]
+      MetricName: HTTPCode_ELB_5XX_Count
+      Namespace: AWS/ApplicationELB
+      Period: 60
+      Statistic: Minimum
+      Threshold: 1
