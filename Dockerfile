@@ -18,10 +18,6 @@ RUN set -xe \
     && apt-get update \
     && apt-get install python-pip
 
-RUN pip3 install --upgrade pip
-
-RUN  pip3 install pymysql
-
 RUN  a2dismod mpm_event \
 	&& a2enmod mpm_prefork cgi \
 	&&  service apache2 restart
