@@ -1,16 +1,20 @@
-#FROM nginx:alpine
-#COPY . /etc/nginx/html/
+FROM ubuntu
+
+# File Author / Maintainer
+MAINTAINER rmuktader
+
+# Update the repository sources list
+RUN apt-get update
+
+# Install and run apache
+RUN apt-get install -y apache2 && apt-get clean
+
+#ENTRYPOINT ["/usr/sbin/apache2", "-k", "start"]
 
 
-FROM ubuntu:14.04.3
+#ENV APACHE_RUN_USER www-data
+#ENV APACHE_RUN_GROUP www-data
+#ENV APACHE_LOG_DIR /var/log/apache2
 
-MAINTAINER Chirag Prajapati
-
-RUN  apt-get update -y 
-
-RUN  apt-get install apache2 -y 
-
-RUN  a2dismod mpm_event \
-	&& a2enmod mpm_prefork cgi \
-	&&  service apache2 restart
-
+EXPOSE 80
+CMD apachectl -D FOREGROUND
