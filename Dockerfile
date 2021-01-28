@@ -1,4 +1,4 @@
-FROM ubuntu
+FROM ubuntu:18.04
 
 # File Author / Maintainer
 MAINTAINER rmuktader

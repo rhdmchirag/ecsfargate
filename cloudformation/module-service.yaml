@@ -68,14 +68,14 @@ Resources:
       Family: !Sub ${AWS::StackName}-td
       RequiresCompatibilities:
         - "FARGATE"
-      Memory: 128
+      Memory: 512
       Cpu: 256
       NetworkMode: "awsvpc"
       ExecutionRoleArn: !Ref TaskExecutionRole
       ContainerDefinitions:
         - Name: !Join ['-', [!Ref Cluster, !Ref 'AWS::AccountId', 'Container']]
           Image: ubuntu:18.04
-          Memory: 128
+          Memory: 400
           PortMappings:
             - ContainerPort: 80
           Environment:
