@@ -75,7 +75,7 @@ Resources:
       ContainerDefinitions:
         - Name: !Join ['-', [!Ref Cluster, !Ref 'AWS::AccountId', 'Container']]
           Image: ubuntu:18.04
-          Memory: 400
+          Memory: 128
           PortMappings:
             - ContainerPort: 80
           Environment:
